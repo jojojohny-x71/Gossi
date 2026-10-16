@@ -54,6 +54,7 @@ class RecognizerLoop(private val context: Context, private val cb: Callbacks) {
     }
 
     private val main = Handler(Looper.getMainLooper())
+    private val watchdog = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
     private var running = false
     private var paused = false
@@ -81,6 +82,7 @@ class RecognizerLoop(private val context: Context, private val cb: Callbacks) {
     fun stop() {
         running = false
         main.removeCallbacksAndMessages(null)
+        watchdog.removeCallbacksAndMessages(null)
         try {
             recognizer?.cancel()
             recognizer?.destroy()
@@ -158,6 +160,7 @@ class RecognizerLoop(private val context: Context, private val cb: Callbacks) {
         }
         sessionActive = true
         sessionToken++
+        armWatchdog()
         try {
             recognizer!!.startListening(intent)
         } catch (e: Exception) {
@@ -166,7 +169,20 @@ class RecognizerLoop(private val context: Context, private val cb: Callbacks) {
         }
     }
 
+    /** A session that produces nothing for 15 s is treated as a timeout (some services hang on app audio). */
+    private fun armWatchdog() {
+        watchdog.removeCallbacksAndMessages(null)
+        val token = sessionToken
+        watchdog.postDelayed({
+            if (sessionActive && token == sessionToken) {
+                try { recognizer?.cancel() } catch (_: Exception) {}
+                listener.onError(SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
+            }
+        }, 15_000)
+    }
+
     private fun endSession(delayMs: Long, recreate: Boolean = false) {
+        watchdog.removeCallbacksAndMessages(null)
         if (sessionActive) {
             sessionActive = false
             cb.onSessionEnd()
@@ -189,6 +205,7 @@ class RecognizerLoop(private val context: Context, private val cb: Callbacks) {
         override fun onEvent(eventType: Int, params: Bundle?) {}
 
         override fun onPartialResults(partialResults: Bundle?) {
+            if (sessionActive) armWatchdog()
             firstResult(partialResults)?.let(cb::onPartial)
         }
 
