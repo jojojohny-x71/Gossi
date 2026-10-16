@@ -139,7 +139,14 @@ class OfflinePipeline(
                 take()
             }
             val pcm = FloatArray(pcm16.size) { pcm16[it] / 32768f }
-            val r = whisper.translate(pcm, forcedLang?.code, allowed, threads, showOriginal) ?: continue
+            val t0 = System.nanoTime()
+            val r = whisper.translate(pcm, forcedLang?.code, allowed, threads, showOriginal)
+            android.util.Log.i(
+                "GossiWhisper",
+                "utterance ${pcm.size / 16} ms audio -> ${(System.nanoTime() - t0) / 1_000_000} ms, " +
+                    "lang=${r?.langCode} noSpeech=${r?.noSpeechProb} text=${r?.english}",
+            )
+            if (r == null) continue
             val english = TranslationFilter.accept(r.english, r.noSpeechProb) ?: continue
             val lang = Lang.fromLocaleTag(r.langCode) ?: Lang.HINDI
             val original = TranslationFilter.cleanup(r.original)
