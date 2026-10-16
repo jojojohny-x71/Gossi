@@ -54,8 +54,16 @@ segmenter, model downloads), `audio/` (mic, earbud mic, speaker detection), `spe
 - **On your phone:** `tools/phone_test.sh Gossi.apk` installs the app and streams the live log
   (`GossiTranscript` lines show each translation, `GossiWhisper` lines show the time per sentence).
 
-First self-test results (Fast model): Hindi translates well, clean and noisy; Tamil, Kannada and
-Malayalam are weak — use the Balanced/Best model or the Google engine for those. The conversation
-test split all 8 lines correctly and gave 7 of 8 the right speaker.
+Latest self-test (spoken test sentences; score = chrF closeness to the reference English, 0–100;
+time = one sentence on a GitHub cloud CPU, not a phone):
+
+| Model | Hindi | Tamil | Kannada | Malayalam | Time per sentence |
+|---|---|---|---|---|---|
+| Fast (60 MB) | good | poor | poor | poor | ~0.5 s |
+| Balanced (190 MB) | ~85 | ~44 | ~46 | ~50 | ~2 s |
+| Best (540 MB) | best | ~66 | good | good | ~7.5 s |
+
+In the four-person conversation, Best got almost every line right (e.g. Tamil "This food is very tasty.",
+Kannada "Where is the bus stop?"); all models split the 8 lines correctly and gave 7 of 8 the right speaker.
 
 Longer-term plan (IndicConformer + IndicTrans2 for better Dravidian-language accuracy): [docs/PLAN.md](docs/PLAN.md).

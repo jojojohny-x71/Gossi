@@ -10,7 +10,20 @@ object TranslationFilter {
         "please subscribe", "thank you very much", "music", "applause",
     )
 
-    fun cleanup(s: String) = s.replace(bracketed, " ").replace(spaces, " ").trim()
+    private val sentenceEnd = Regex("(?<=[.!?।])\\s+")
+
+    fun cleanup(s: String) = dropRepeats(s.replace(bracketed, " ").replace(spaces, " ").trim())
+
+    /** Whisper sometimes loops ("I need coffee. I need coffee."): keep each sentence once in a row. */
+    private fun dropRepeats(s: String): String {
+        val out = ArrayList<String>()
+        for (part in s.split(sentenceEnd)) {
+            val key = part.lowercase().trim(' ', '.', '!', '?', ',', '।')
+            if (key.isNotEmpty() && out.lastOrNull()?.lowercase()?.trim(' ', '.', '!', '?', ',', '।') == key) continue
+            out.add(part)
+        }
+        return out.joinToString(" ")
+    }
 
     /** @return the cleaned English line, or null if it should be ignored. */
     fun accept(english: String, noSpeechProb: Float): String? {
