@@ -1,5 +1,17 @@
 package app.gossi.core
 
+import app.gossi.offline.WhisperModel
+
+enum class RecognitionEngine(val label: String) {
+    OFFLINE("Gossi offline — speech → English on the phone (download once)"),
+    GOOGLE("Google speech + Google Translate — shows original text, best accuracy online"),
+}
+
+enum class MicSource(val label: String) {
+    PHONE("Phone microphone — best sound quality in your ears"),
+    EARBUDS("Earbud microphone — earbuds switch to call mode (mono audio)"),
+}
+
 enum class TranslationMode(val label: String) {
     ONLINE_FIRST("Online first (Google, free) — falls back to offline"),
     OFFLINE_FIRST("Offline first (on-phone) — falls back to online"),
@@ -7,6 +19,13 @@ enum class TranslationMode(val label: String) {
 }
 
 data class Settings(
+    val engine: RecognitionEngine = RecognitionEngine.OFFLINE,
+    val mic: MicSource = MicSource.PHONE,
+    val whisperModel: WhisperModel = WhisperModel.SMALL,
+    /** Turn music/videos down while a translation plays. */
+    val duckOthers: Boolean = true,
+    /** Offline engine: also transcribe the original language (roughly doubles processing time). */
+    val showOriginal: Boolean = false,
     /** null = detect automatically. */
     val language: Lang? = null,
     val translationMode: TranslationMode = TranslationMode.ONLINE_FIRST,

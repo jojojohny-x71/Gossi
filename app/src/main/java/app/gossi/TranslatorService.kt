@@ -75,7 +75,10 @@ class TranslatorService : Service() {
     private var lastShown: String? = null
 
     private fun updateNotification() {
-        if (!Engine.running) return
+        if (!Engine.running) {
+            stopSelf()
+            return
+        }
         val text = Engine.segments.lastOrNull { it.english != null }?.english ?: Engine.status
         if (text == lastShown) return
         lastShown = text

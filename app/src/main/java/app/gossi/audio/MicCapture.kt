@@ -1,6 +1,7 @@
 package app.gossi.audio
 
 import android.annotation.SuppressLint
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -15,6 +16,8 @@ import kotlin.math.max
  */
 class MicCapture(
     private val strongNoiseSuppression: Boolean,
+    /** e.g. the Bluetooth earbud mic; null = phone mic. */
+    private val preferredDevice: AudioDeviceInfo? = null,
     private val onFrame: (ShortArray, Int) -> Unit,
     private val onError: (String) -> Unit,
 ) {
@@ -45,7 +48,8 @@ class MicCapture(
     @SuppressLint("MissingPermission") // checked by the activity before the service starts
     private fun loop() {
         // VOICE_COMMUNICATION enables the phone's call-grade noise suppression / echo cancelling.
-        val source = if (strongNoiseSuppression) MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        // Earbud mics (Bluetooth SCO) are only reachable through the communication source.
+        val source = if (strongNoiseSuppression || preferredDevice != null) MediaRecorder.AudioSource.VOICE_COMMUNICATION
         else MediaRecorder.AudioSource.VOICE_RECOGNITION
         val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val rec = try {
@@ -54,6 +58,7 @@ class MicCapture(
             onError("Cannot open microphone: ${e.message}")
             return
         }
+        if (preferredDevice != null) rec.setPreferredDevice(preferredDevice)
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
             rec.release()
             onError("Microphone is busy or unavailable")

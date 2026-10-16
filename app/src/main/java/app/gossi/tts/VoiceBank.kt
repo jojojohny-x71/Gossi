@@ -2,6 +2,8 @@ package app.gossi.tts
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
@@ -19,6 +21,11 @@ class VoiceBank(context: Context, private val onSpeakingChanged: (Boolean) -> Un
     class Preset(val voice: Voice?, val pitch: Float, val label: String)
 
     private val main = Handler(Looper.getMainLooper())
+    private val audioManager = context.getSystemService(AudioManager::class.java)
+    private var focusRequest: AudioFocusRequest? = null
+    private var callAudio = false
+    /** Turn other apps' audio down while Gossi is speaking. */
+    var duckOthers = true
     private var ready = false
     private var pending = 0
     private var counter = 0
@@ -31,12 +38,7 @@ class VoiceBank(context: Context, private val onSpeakingChanged: (Boolean) -> Un
 
     private fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) return
-        tts.setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build(),
-        )
+        tts.setAudioAttributes(attributes())
         tts.language = Locale("en", "IN")
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
@@ -59,8 +61,40 @@ class VoiceBank(context: Context, private val onSpeakingChanged: (Boolean) -> Un
     private fun finished() {
         main.post {
             pending = (pending - 1).coerceAtLeast(0)
-            if (pending == 0) onSpeakingChanged(false)
+            if (pending == 0) {
+                releaseFocus()
+                onSpeakingChanged(false)
+            }
         }
+    }
+
+    private fun attributes(): AudioAttributes = AudioAttributes.Builder()
+        .setUsage(if (callAudio) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
+
+    /**
+     * When the earbud mic is in use the earbuds are in "call" mode, so speech must go over the
+     * call link too (media audio would come out of the phone speaker).
+     */
+    fun setCallAudio(enabled: Boolean) {
+        callAudio = enabled
+        if (ready) tts.setAudioAttributes(attributes())
+    }
+
+    /** Like Apple's Live Translation: other audio is turned down while a translation plays. */
+    private fun requestFocus() {
+        if (!duckOthers || focusRequest != null) return
+        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+            .setAudioAttributes(attributes())
+            .setWillPauseWhenDucked(false)
+            .build()
+        if (audioManager.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) focusRequest = req
+    }
+
+    private fun releaseFocus() {
+        focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        focusRequest = null
     }
 
     private fun pickVoices(): List<Voice> {
@@ -126,6 +160,7 @@ class VoiceBank(context: Context, private val onSpeakingChanged: (Boolean) -> Un
             else -> 1f
         }
         tts.setSpeechRate(rate)
+        requestFocus()
         pending++
         tts.speak(text, TextToSpeech.QUEUE_ADD, null, "g${counter++}")
     }
@@ -136,6 +171,7 @@ class VoiceBank(context: Context, private val onSpeakingChanged: (Boolean) -> Un
         if (!ready) return
         tts.stop()
         pending = 0
+        releaseFocus()
         onSpeakingChanged(false)
     }
 

@@ -8,6 +8,9 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.widget.ProgressBar
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -28,6 +31,9 @@ import app.gossi.R
 import app.gossi.TranslatorService
 import app.gossi.core.Engine
 import app.gossi.core.Lang
+import app.gossi.core.MicSource
+import app.gossi.core.RecognitionEngine
+import app.gossi.offline.WhisperModel
 import app.gossi.core.Segment
 import app.gossi.core.Settings
 import app.gossi.core.TranslationMode
@@ -52,6 +58,16 @@ class MainActivity : Activity(), Engine.Listener {
     private lateinit var emptyView: TextView
     private lateinit var startButton: Button
     private val rows = HashMap<Long, Row>()
+    private lateinit var levelBar: ProgressBar
+    private val ui = Handler(Looper.getMainLooper())
+    private var modelDialog: AlertDialog? = null
+    private var modelDialogBox: LinearLayout? = null
+    private val levelTick = object : Runnable {
+        override fun run() {
+            levelBar.progress = (Engine.inputLevel * 100).toInt()
+            ui.postDelayed(this, 120)
+        }
+    }
 
     private val textPrimary get() = getColor(R.color.text_primary)
     private val textSecondary get() = getColor(R.color.text_secondary)
@@ -66,6 +82,16 @@ class MainActivity : Activity(), Engine.Listener {
         super.onStart()
         Engine.addListener(this)
         render()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ui.post(levelTick)
+    }
+
+    override fun onPause() {
+        ui.removeCallbacks(levelTick)
+        super.onPause()
     }
 
     override fun onStop() {
@@ -113,6 +139,11 @@ class MainActivity : Activity(), Engine.Listener {
             setPadding(0, dp(2), 0, dp(8))
         }
         root.addView(statusView)
+        levelBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progressTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.accent))
+        }
+        root.addView(levelBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)).apply { bottomMargin = dp(8) })
 
         bannerView = TextView(this).apply {
             textSize = 13f
@@ -214,7 +245,11 @@ class MainActivity : Activity(), Engine.Listener {
 
     private fun render() {
         if (!::statusView.isInitialized) return
-        statusView.text = Engine.status
+        statusView.text = Engine.status +
+            if (Engine.pendingUtterances > 0) "  ·  translating ${Engine.pendingUtterances}…" else ""
+        levelBar.visibility = if (Engine.running && Engine.settings.engine == RecognitionEngine.OFFLINE) View.VISIBLE else View.INVISIBLE
+        if (Engine.needsModel && modelDialog?.isShowing != true) showModelDialog()
+        renderModelDialog()
         bannerView.text = if (Engine.headphonesConnected) {
             "🎧 Earbuds connected. Set noise cancellation to High (Nothing X app or quick settings) so you only hear the translation."
         } else {
@@ -307,6 +342,9 @@ class MainActivity : Activity(), Engine.Listener {
     private fun startTranslating() {
         val needed = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= 33) needed.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT >= 31 && Engine.settings.mic == MicSource.EARBUDS) {
+            needed.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
         val missing = needed.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
             requestPermissions(missing.toTypedArray(), 1)
@@ -382,7 +420,44 @@ class MainActivity : Activity(), Engine.Listener {
             setPadding(dp(20), dp(8), dp(20), dp(8))
         }
 
-        box.addView(label("Translation"))
+        box.addView(label("Speech engine"))
+        val engines = RadioGroup(this)
+        RecognitionEngine.entries.forEachIndexed { i, e ->
+            engines.addView(RadioButton(this).apply {
+                id = 3000 + i
+                text = e.label
+                isChecked = draft.engine == e
+                setOnClickListener { draft = draft.copy(engine = e) }
+            })
+        }
+        box.addView(engines)
+        box.addView(Button(this).apply {
+            text = "Offline model: ${draft.whisperModel.label.substringBefore(" —")}" +
+                if (Engine.isModelDownloaded(draft.whisperModel)) " ✓" else " (not downloaded)"
+            isAllCaps = false
+            setOnClickListener { showModelDialog() }
+        })
+        box.addView(switch("Offline: also show the original text (slower)", draft.showOriginal) {
+            draft = draft.copy(showOriginal = it)
+        })
+
+        box.addView(label("Microphone"))
+        val mics = RadioGroup(this)
+        MicSource.entries.forEachIndexed { i, m ->
+            mics.addView(RadioButton(this).apply {
+                id = 4000 + i
+                text = m.label
+                isChecked = draft.mic == m
+                setOnClickListener { draft = draft.copy(mic = m) }
+            })
+        }
+        box.addView(mics)
+        box.addView(note("Earbud mic: Bluetooth earbuds can only send their mic over the call link, so while listening your Ear (a) sounds like a phone call (mono). Noise cancellation still works."))
+        box.addView(switch("Lower music and other apps while Gossi speaks", draft.duckOthers) {
+            draft = draft.copy(duckOthers = it)
+        })
+
+        box.addView(label("Translation (Google engine)"))
         val modes = RadioGroup(this)
         TranslationMode.entries.forEachIndexed { i, mode ->
             modes.addView(RadioButton(this).apply {
@@ -445,6 +520,64 @@ class MainActivity : Activity(), Engine.Listener {
             .setPositiveButton("Save") { _, _ -> Engine.updateSettings(draft) }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun showModelDialog() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        modelDialogBox = box
+        modelDialog = AlertDialog.Builder(this)
+            .setTitle("Offline translator")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Close", null)
+            .setOnDismissListener { modelDialog = null; modelDialogBox = null }
+            .show()
+        renderModelDialog()
+    }
+
+    private fun renderModelDialog() {
+        val box = modelDialogBox ?: return
+        box.removeAllViews()
+        box.addView(note(
+            "Runs speech → English entirely on your phone (OpenAI Whisper, open source). Download once over Wi-Fi; " +
+                "after that Gossi works in airplane mode. Detects Hindi, Tamil, Kannada, Malayalam and English.",
+        ))
+        val downloading = Engine.downloadingModel
+        for (m in WhisperModel.entries) {
+            val have = Engine.isModelDownloaded(m)
+            val inUse = Engine.settings.whisperModel == m && Engine.settings.engine == RecognitionEngine.OFFLINE
+            box.addView(TextView(this).apply {
+                text = m.label + when {
+                    downloading == m -> "\nDownloading… ${Engine.downloadProgress}%"
+                    inUse && have -> "\n✓ Downloaded · in use"
+                    have -> "\n✓ Downloaded"
+                    else -> ""
+                }
+                textSize = 15f
+                setTextColor(textPrimary)
+                setPadding(0, dp(10), 0, dp(4))
+            })
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            fun btn(t: String, onClick: () -> Unit) = row.addView(Button(this).apply {
+                text = t
+                isAllCaps = false
+                setOnClickListener { onClick() }
+            })
+            when {
+                downloading == m -> btn("Cancel") { Engine.cancelDownload() }
+                have -> {
+                    if (!inUse) btn("Use this") {
+                        Engine.updateSettings(Engine.settings.copy(whisperModel = m, engine = RecognitionEngine.OFFLINE))
+                    }
+                    btn("Delete") { Engine.deleteModel(m) }
+                }
+                downloading == null -> btn("Download ${m.sizeMb} MB") { Engine.downloadModel(m) }
+            }
+            box.addView(row)
+        }
+        Engine.downloadMessage?.let { box.addView(note("\n$it")) }
     }
 
     private fun note(t: String) = TextView(this).apply {
