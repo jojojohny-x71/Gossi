@@ -1,250 +1,267 @@
-# Gossi — Multilingual Earphone Translator: Plan & Spec
+# Gossi — Offline Indian-Language → English Earphone Translator: Plan & Spec
 
-> **Goal:** You wear earphones. People around you talk in up to ~5 different languages.
-> Gossi cuts the background noise, works out who is speaking and in what language,
-> translates everything into **one language you understand**, and speaks it into your ears
-> with a **different voice for each speaker** so you can tell them apart.
-> Offline-first, built on open-source components wherever possible.
+> **Goal:** You wear your earbuds. People around you speak **Hindi, Tamil, Kannada or
+> Malayalam** (often mixed with English). Gossi removes background noise, works out who is
+> speaking and in which language, translates it into **English**, and speaks it into your ears
+> with a **different voice for each speaker**.
+> **100 % on the phone, no internet, no server.** Open-source models only.
+
+## 0. Fixed decisions
+
+| Decision | Value |
+|---|---|
+| Run mode | **On-device only** (no home server, no cloud) |
+| Target language (what you hear) | **English** |
+| Source languages | **Hindi, Tamil, Kannada, Malayalam** (+ English, which is passed through untranslated) |
+| Phone | **Nothing Phone (2)** — Snapdragon 8+ Gen 1, 8/12 GB RAM, Android (Nothing OS) |
+| Earbuds | **Nothing Ear (a)** — hardware ANC, Bluetooth A2DP (AAC/LDAC) |
+| Platform | **Android only**, native Kotlin |
+| Licensing | Only commercially-friendly licences (MIT / Apache-2.0 / BSD) so the app can be shipped later |
+
+> If the phone is actually a **Phone (2a)** (Dimensity 7200 Pro) rather than **Phone (2)**,
+> everything still applies — the app picks the "Mid" model profile (§4.3) automatically.
 
 ---
 
-## 1. What the product does
+## 1. What the user experiences
 
 ```
- People talking (EN, HI, ES, AR, ZH ...)  +  traffic / crowd / music
-                        │
-                 [ phone / earbud mic ]
-                        │
-   1. Clean up       noise suppression + voice activity detection
-   2. Who?           speaker diarization  → Speaker A, B, C ...
-   3. Which lang?    language ID (limited to the languages you pick)
-   4. What said?     speech-to-text (ASR)
-   5. Translate      → your language (e.g. English or Malayalam)
-   6. Speak it       text-to-speech, one distinct voice per speaker
-                        │
-                 [ your earbuds, ANC on ]   +  live transcript on screen
+ Ravi (Hindi) · Priya (Tamil) · Arun (Kannada) · Meera (Malayalam)  +  traffic / fan / crowd
+                                   │
+                      [ Nothing Phone (2) mics ]
+                                   │
+   1. Clean up        noise suppression + speech detection
+   2. Who?            speaker A / B / C / D
+   3. Which language? hi / ta / kn / ml / en
+   4. What was said?  Indian-language speech recognition
+   5. Translate       → English
+   6. Speak it        English TTS, a distinct voice per speaker
+                                   │
+                [ Nothing Ear (a), ANC ON ]  +  live transcript on screen
 ```
 
-### Core user stories
+### User stories
 | # | As a user I want to… | Priority |
 |---|---|---|
-| U1 | Hear background noise cut out while I listen | Must |
-| U2 | Hear anything said near me translated into my language | Must |
-| U3 | Tell speakers apart by voice (Speaker A sounds different from B) | Must |
-| U4 | Use it with no internet (flight, abroad, bad signal) | Must |
-| U5 | See a live transcript (original + translation) on my phone | Must |
-| U6 | Choose the languages expected in this conversation (up to 5) | Must |
-| U7 | Not hear my own speech translated back to me | Should |
-| U8 | Rename speakers ("Speaker B" → "Ravi") and pick their voices | Should |
-| U9 | Use a more accurate "home server / cloud" mode when online | Should |
-| U10 | Translated voice that resembles the original speaker (voice cloning) | Could |
-| U11 | Save / export conversation transcripts | Could |
+| U1 | Hear the room's background noise removed (earbud ANC on) | Must |
+| U2 | Hear Hindi / Tamil / Kannada / Malayalam speech in English | Must |
+| U3 | Tell speakers apart by their English voice | Must |
+| U4 | Everything works in airplane mode | Must |
+| U5 | See a live transcript (original script + English) | Must |
+| U6 | Not hear my own speech translated back to me | Should |
+| U7 | Rename speakers and choose their voices | Should |
+| U8 | Mixed speech (Hinglish, Tanglish, etc.) handled sensibly | Should |
+| U9 | English speech left as-is (optionally re-voiced or just shown on screen) | Should |
+| U10 | Save / export transcripts | Could |
 
 ---
 
-## 2. An important reality check: "noise cancelling"
+## 2. Noise cancelling with Nothing Ear (a)
 
-There are **two different things** people mean by noise cancelling, and the app needs both:
+Two separate jobs:
 
-1. **Acoustic ANC (what reaches your ears).** This is done by the *earbud hardware*
-   (AirPods Pro, Galaxy Buds, Sony WF-1000XM, Pixel Buds Pro, Nothing Ear...).
-   A phone app **cannot** do real acoustic ANC over Bluetooth — the latency is far too high.
-   → The app asks the user to switch ANC **on** (Android/Samsung/Sony let some apps toggle
-   modes via vendor SDKs; on iOS the user toggles it). With ANC on, the user hears
-   *only* Gossi's translated voices.
+1. **What you hear → Nothing Ear (a) hardware ANC.** A phone app cannot do acoustic noise
+   cancelling over Bluetooth (too much delay). The earbuds do it. Nothing does not publish an
+   SDK for apps to switch ANC modes, so the app **asks you to set ANC to "High"** in Nothing X
+   / quick settings, and shows a reminder on the start screen. With ANC on, you hear mostly
+   Gossi's English voices.
+2. **What the AI hears → software noise suppression on the phone mic.** Run before speech
+   recognition:
+   - **GTCRN** (tiny, < 1 MB, built into sherpa-onnx) — default, almost free on battery.
+   - **DeepFilterNet 3** (MIT/Apache) — stronger, for very noisy places (toggle "Noisy mode").
 
-2. **Software noise suppression (what the AI hears).** We clean the *microphone* signal
-   before speech recognition so the models aren't confused by background noise.
-   This is fully in our control → **DeepFilterNet 3** or **RNNoise** (both open source).
+Optional **"room mix"** slider: blends a little *denoised* original sound under the
+translation so you still sense who is talking (like transparency mode, but clean).
 
-Optional: a **"pass-through mix"** slider that blends a little denoised original audio
-under the translation so you still sense the room (like transparency mode, but clean).
-
-### Microphone choice (matters a lot)
-| Mic source | Quality | Notes |
-|---|---|---|
-| Earbud mic over classic Bluetooth (HFP) | Poor (8–16 kHz, mono) | Also forces earbud *playback* into low-quality call mode. Avoid for v1. |
-| **Phone's built-in mics** | **Good** | **Default for v1.** Phone on the table / in hand, earbuds stay in high-quality A2DP for playback. |
-| Earbud mic over **LE Audio (LC3)** | Good | Newer phones/buds (Android 13+, Pixel/Samsung). Phase 3. |
-| External clip-on / USB-C mic | Best | Optional accessory for meetings. |
+### Microphone
+- **Use the phone's built-in mics, not the earbud mics.** Earbud mics over Bluetooth force the
+  earbuds into low-quality "call" mode (HFP, 16 kHz, mono) which ruins playback quality too.
+- Phone sits on the table or in your shirt pocket facing out; Ear (a) stays on high-quality
+  A2DP for listening.
+- Android: record with `AudioSource.UNPROCESSED` (or `VOICE_RECOGNITION`) and route output
+  to the Bluetooth A2DP device.
 
 ---
 
 ## 3. Architecture
 
-### 3.1 Pipeline (per audio stream)
+### 3.1 Pipeline
 
 ```
-Mic 16 kHz PCM
-  └─► Noise suppression (DeepFilterNet3 / RNNoise)            ~10 ms frames
-       └─► VAD (Silero VAD)  → speech segments (end-of-utterance after ~400 ms silence)
-            ├─► Speaker embedding (ECAPA / CAM++ / WeSpeaker) → online clustering → speaker_id
-            │      └─► "is this me?" check against the user's enrolled voice → drop if yes
-            ├─► Language ID (Whisper LID, restricted to the session's chosen languages)
-            └─► ASR (Whisper / per-language streaming Zipformer)  → source text
-                 └─► MT  source text → target language            → translated text
-                      └─► TTS with voice = voice_for(speaker_id)   → audio
-                           └─► Playback queue (ducking, speed-up if backlog) → earbuds
-                                └─► UI transcript (original + translation, colour per speaker)
+Phone mic 16 kHz mono PCM  (Oboe, 10 ms frames)
+ └─► Noise suppression        GTCRN  (or DeepFilterNet3 in Noisy mode)
+      └─► VAD                 Silero VAD v5 → utterance ends after ~400 ms silence (max 8 s)
+           ├─► Speaker ID     CAM++ / WeSpeaker embedding → online clustering → speaker_id
+           │     └─► Self check: matches your enrolled voice?  → skip
+           ├─► Language ID    VoxLingua107 ECAPA, restricted to {hi, ta, kn, ml, en}
+           │                  + per-speaker language prior
+           └─► ASR            IndicConformer (hi/ta/kn/ml)  → text in native script
+                └─► Translate IndicTrans2 indic→en (distilled, int8)   → English text
+                     └─► TTS  Kokoro-82M English, voice = voice_for(speaker_id)
+                          └─► Playback queue (ducking, speed-up when behind) → Ear (a)
+                               └─► Transcript UI (colour per speaker)
+English utterance  → skip ASR-translate; optional: show only / re-voice
 ```
 
-### 3.2 Three run modes (same app, same pipeline interface)
+All stages implement small Kotlin interfaces (`Denoiser`, `Vad`, `SpeakerId`, `LangId`,
+`Asr`, `Translator`, `Tts`) so any model can be swapped after benchmarking.
 
-| Mode | Where models run | When | Quality | Latency |
-|---|---|---|---|---|
-| **A. Offline (default)** | 100 % on the phone | Always available | Good | 1.5–3 s |
-| **B. Home server** | Your own PC / Mac / GPU box, reached over LAN or Tailscale/WireGuard | At home/office, or anywhere with Tailscale | Best (large models) | 1–2 s |
-| **C. Cloud (optional)** | Self-hosted GPU VM, or paid APIs as last resort | When online and phone is weak | Best | 1–2 s + network |
+### 3.2 App stack
 
-Every pipeline stage is behind an interface (`Denoiser`, `Vad`, `Diarizer`, `LangId`,
-`Asr`, `Translator`, `Tts`), so each stage can be local or remote independently
-(e.g. local ASR + remote voice-cloning TTS).
-
-### 3.3 Client app
-
-**Recommendation: Android first, native Kotlin + a shared C/C++ inference core.**
-
-Why Android first: freer audio routing (choose input mic vs. output device separately),
-easy side-loading of large model files, LE Audio support, vendor ANC SDKs, cheaper test devices.
-iOS follows in Phase 3 reusing the same C/C++ core (Swift UI shell).
-
-| Layer | Choice | Why |
+| Layer | Choice | Licence |
 |---|---|---|
-| UI | Kotlin + Jetpack Compose (Android), SwiftUI (iOS later) | Native audio APIs, best latency |
-| Audio I/O | Oboe (Android, Apache-2.0) / AVAudioEngine (iOS) | Low-latency capture & playback |
-| Speech toolkit | **sherpa-onnx** (Apache-2.0) | One library for VAD, ASR, speaker ID, language ID, TTS, with Android/iOS/Flutter bindings. Huge shortcut. |
-| Whisper runtime | **whisper.cpp** (MIT) | Quantized multilingual Whisper on CPU/GPU/NPU |
-| Translation runtime | **CTranslate2** (MIT) or **Bergamot** (MPL-2.0) or **llama.cpp** (MIT) | Fast int8 MT on mobile CPU |
-| Background service | Android Foreground Service (type `microphone`) | Keeps running with screen off |
-| Storage | Room/SQLite for transcripts; model files in app storage | Offline |
-| Model manager | Downloadable "language packs" with checksums | Keeps the base app small |
+| UI | Kotlin + Jetpack Compose | — |
+| Audio I/O | **Oboe** (low-latency capture/playback) | Apache-2.0 |
+| Background | Foreground Service (`foregroundServiceType="microphone"`), runs with screen off | — |
+| Speech toolkit | **sherpa-onnx** — VAD, denoise, speaker embedding, TTS (Kokoro), ONNX ASR | Apache-2.0 |
+| Inference runtime | **ONNX Runtime** (CPU + XNNPACK; QNN/NNAPI for the Snapdragon NPU where it helps) | MIT |
+| Translation runtime | **CTranslate2** (int8) for IndicTrans2 — or ONNX Runtime export | MIT |
+| Indic text handling | **IndicNLP / IndicTransToolkit** pre/post-processing (ported to Kotlin/C++) | MIT |
+| Storage | Room (SQLite) for sessions/transcripts; models in app-private storage | — |
+| Model manager | One-time download of a "language pack" (checksummed), then fully offline | — |
 
-> Alternative if you strongly want one codebase: **Flutter** + sherpa-onnx's Flutter plugin.
-> Faster to build both platforms, slightly less control over audio. Native is recommended
-> for a real-time audio product.
-
-### 3.4 Backend (Modes B & C)
-
-| Concern | Choice |
-|---|---|
-| Language / framework | Python 3.11 + **FastAPI** |
-| Transport | **WebSocket** streaming (Opus-encoded 20 ms frames up, JSON + Opus audio down). gRPC is an option later. |
-| ASR | **faster-whisper** (MIT, CTranslate2) with Whisper **large-v3-turbo**; streaming via the `whisper_streaming` / `SimulStreaming` approach (local-agreement policy) |
-| Diarization | **pyannote.audio 3.x** (MIT code; model needs HF terms acceptance) or **NVIDIA NeMo Sortformer** (Apache-2.0) |
-| Translation | Qwen3 / Gemma-class LLM via **vLLM** or **llama.cpp server**, or **NLLB-200** (non-commercial) / **MADLAD-400** (Apache-2.0) via CTranslate2 |
-| TTS + voice cloning | **OpenVoice V2** (MIT) tone converter over Kokoro/MeloTTS; **CosyVoice 2** (Apache-2.0) |
-| Packaging | Docker Compose; one image with CUDA, one CPU-only |
-| Auth (remote) | Device pairing via QR code → per-device token; TLS; prefer Tailscale for zero-config private networking |
-| Privacy | Audio processed in memory, never stored unless user enables history |
-
-The backend is **optional** — the product must be fully usable in Mode A.
+Native code (sherpa-onnx, CTranslate2) is called over JNI from a single `PipelineEngine`
+running on dedicated threads: audio thread → recognition thread → TTS thread.
 
 ---
 
-## 4. Model choices (open source first)
+## 4. Model choices (all on-device, all commercial-friendly)
 
-### 4.1 Recommended stack per stage
+### 4.1 Why not just Whisper?
+Whisper is good for Hindi but **weak for Tamil, Kannada and Malayalam** (high word error
+rates), and its autoregressive decoder is slow on a phone. **AI4Bharat's** models are trained
+specifically on Indian-language speech (IndicVoices, Kathbath, etc.) and are much better here.
 
-| Stage | On-device (Mode A) | Server (Mode B/C) | License |
+### 4.2 Recommended stack
+
+| Stage | Model | Approx. size (int8) | Licence |
 |---|---|---|---|
-| Noise suppression | **DeepFilterNet 3** (ONNX) — fallback **RNNoise** for low-end phones | DeepFilterNet 3 | MIT/Apache-2.0 · BSD |
-| VAD | **Silero VAD v5** | Silero VAD | MIT |
-| Speaker embedding / diarization | **3D-Speaker CAM++** or **WeSpeaker ResNet34** via sherpa-onnx + online agglomerative clustering | **pyannote 3.1** or **NeMo Sortformer** | Apache-2.0 · MIT |
-| Language ID | **Whisper LID** (restricted to chosen languages) — or SpeechBrain **VoxLingua107 ECAPA** | Whisper large-v3 LID | MIT · Apache-2.0 |
-| ASR | **Whisper small / medium (q5/q8)** via whisper.cpp; for latency-critical languages, **streaming Zipformer** models via sherpa-onnx | **Whisper large-v3-turbo** via faster-whisper | MIT · Apache-2.0 |
-| Translation | **Bergamot / OPUS-MT** (small, fast, per language pair) via CTranslate2; **IndicTrans2** for Indian languages; small LLM (**Qwen3-1.7B / 4B**, q4) for "any-to-any" | **Qwen3-8B/14B** or **Gemma 3 12B**, or **MADLAD-400** | MIT/CC-BY · MIT · Apache-2.0 |
-| TTS | **Piper** (many languages, many voices, very fast) and **Kokoro-82M** (higher quality, fewer languages) via sherpa-onnx | Kokoro / MeloTTS + **OpenVoice V2** cloning; **CosyVoice 2** | MIT · Apache-2.0 |
+| Noise suppression | **GTCRN** (default) / **DeepFilterNet 3** (noisy mode) | < 1 MB / ~10 MB | MIT / MIT-Apache |
+| VAD | **Silero VAD v5** | 2 MB | MIT |
+| Speaker embedding | **3D-Speaker CAM++** or **WeSpeaker ResNet34** (sherpa-onnx) | 25–30 MB | Apache-2.0 |
+| Language ID | **SpeechBrain VoxLingua107 ECAPA** (covers hi, ta, kn, ml, en) exported to ONNX | ~40–80 MB | Apache-2.0 |
+| ASR | **AI4Bharat IndicConformer** — multilingual 600M model, *or* the smaller per-language models for hi/ta/kn/ml (CTC/RNN-T, non-autoregressive → fast) exported from NeMo to ONNX | ~600 MB multilingual, or ~4 × 120–150 MB | MIT |
+| Translation | **AI4Bharat IndicTrans2 indic→en distilled (~200M)** via CTranslate2 int8 | ~250 MB | MIT |
+| TTS | **Kokoro-82M** (English; one model with many voices — American/British, male/female) via sherpa-onnx | ~90–330 MB | Apache-2.0 |
+| Fallback TTS | **Piper** English voices (even faster, lower quality) | ~60 MB/voice | MIT |
 
-### 4.2 License watch-list (important if this ever becomes commercial)
-These are excellent but **non-commercial** — fine for a personal project, avoid for a product:
-- **NLLB-200** and **SeamlessM4T / SeamlessStreaming** (Meta) — CC-BY-NC 4.0
-- **Coqui XTTS-v2** — Coqui Public Model License (non-commercial)
-- **F5-TTS** weights — CC-BY-NC
+**Total download ≈ 1.0–1.4 GB.** Peak RAM ≈ 1.2–1.6 GB, comfortable on an 8/12 GB Phone (2).
 
-Not open source but free & offline (acceptable fallback): **Google ML Kit on-device translation**.
+> **Alternative ASR to benchmark in Phase 0:** Vistaar / IndicWhisper (Whisper fine-tuned on
+> Indian languages). Better than plain Whisper, but slower than IndicConformer on-device.
+> For Hindi only, Whisper `task=translate` (speech → English in one step) is also worth one test.
 
-### 4.3 "One-shot" alternative worth prototyping
-**Whisper `task=translate`** goes straight from any language → English in one model
-(skipping separate MT). If your target language is English, this is the simplest v0.
-It only outputs English, so it isn't the long-term answer if you want e.g. Malayalam/Hindi output.
+### 4.3 Device profiles (auto-selected by a 30-second benchmark at first launch)
 
----
+| Profile | Device class | ASR | MT | TTS |
+|---|---|---|---|---|
+| **High** | Phone (2), 8+ Gen 1 | IndicConformer multilingual 600M | IndicTrans2 distilled 200M | Kokoro |
+| **Mid** | Phone (2a)/(3a)-class | per-language IndicConformer (load only the 2 most-used + swap) | IndicTrans2 distilled | Kokoro (int8) |
+| **Low / battery saver** | any | per-language models | IndicTrans2 distilled | Piper |
 
-## 5. The "different voice per speaker" feature
-
-**v1 — Voice palette (offline, simple, reliable)**
-- The target-language TTS ships with a palette of 6–8 clearly different voices
-  (male/female, low/high pitch, different accents/dialects, e.g. en-US, en-GB, en-IN, en-AU).
-- When a new speaker is detected, estimate pitch (F0) and rough gender from their audio and
-  assign the closest *unused* voice from the palette → Speaker A always sounds like Voice 3.
-- Optional: pick the voice's **dialect/accent by source language** (e.g. Spanish speaker →
-  voice with a Spanish-accented style if available) so origin is audible.
-- User can override in the UI (rename speaker, choose voice).
-
-**v2 — Voice resemblance (server, Phase 3)**
-- After ~5–10 s of a speaker's audio, build a voice embedding and use **OpenVoice V2**
-  tone-colour conversion (or CosyVoice 2 zero-shot) so the translation sounds *like them*.
-- Requires opt-in and a visible indicator — this is voice cloning, so consent matters.
+### 4.4 Code-mixing (very common in India)
+- People say "Meeting kal postpone ho gaya, so we'll do it Monday."
+- IndicConformer outputs English words in native script or Latin depending on training;
+  IndicTrans2 handles most mixed input. Post-process: keep recognised English tokens as-is.
+- If the language-ID score is split between English and an Indian language → treat as the
+  Indian language (translation of mixed text is safe; skipping it is not).
+- Test set (§8) must include code-mixed speech for all four languages.
 
 ---
 
-## 6. Handling the hard cases
+## 5. A different English voice per speaker
+
+**Voice palette (v1):** Kokoro's English voices give 8+ clearly different voices
+(American/British, male/female, different pitch). One Kokoro model serves all of them, so
+adding speakers costs no extra memory.
+
+1. New speaker detected → estimate pitch (F0) from their audio → assign the closest unused
+   voice of matching register (low voice → low voice).
+2. Speaker keeps that voice for the whole session; the transcript bubble uses a matching colour.
+3. Optional "**accent by language**" setting: e.g. Hindi speakers → voice group 1, Tamil →
+   group 2… so you can also *hear* which language the person spoke.
+4. Phase 2 experiment: Kokoro also has Hindi voices — test whether they read English text with
+   a natural Indian-English accent; if yes, offer an "Indian English voices" palette.
+5. In the Speakers sheet you can rename ("Speaker B" → "Priya"), change voice, merge two
+   speakers, or mute one.
+
+Voice *cloning* (sounding like the real person) is not planned on-device — current
+open models are too heavy for real time on a phone. Revisit later.
+
+---
+
+## 6. Hard cases
 
 | Problem | Approach |
 |---|---|
-| **Short utterances → wrong language detected** | User picks the expected languages (≤5) at session start; LID chooses only among those. Keep a per-speaker language prior (Speaker B spoke Hindi last 3 times → likely Hindi). |
-| **Code-switching** (Hinglish, Spanglish) | Whisper handles mixed speech reasonably; let MT/LLM translate mixed text as-is. |
-| **Two people talking at once** | v1: diarization picks dominant speaker; output queued. v3: speech separation (SepFormer / MossFormer2, Apache-2.0) on server. |
-| **Backlog (people talk faster than TTS speaks)** | Playback queue with: TTS speed-up 1.0→1.3×, drop filler/duplicate segments, summarise if queue > N seconds (LLM mode). Transcript always shows everything. |
-| **Whisper hallucinating on noise/silence** | Only feed VAD-confirmed speech; drop low-confidence segments (`no_speech_prob`, avg logprob thresholds); denoise first. |
-| **Hearing yourself** | Enroll your voice once (10 s); segments matching your embedding are skipped (or optionally translated *outward* through the phone speaker — future "two-way" mode). |
-| **Battery & heat** | Models loaded once; VAD gates everything (ASR/MT/TTS only run on speech); use NNAPI/GPU/NPU delegates where available; "low power" profile with smaller models. |
-| **Phone too weak** | Automatic profile selection at install (benchmark run): Low / Mid / High model sets. |
+| Short utterances → wrong language | LID only chooses among {hi, ta, kn, ml, en}; per-speaker language prior (if Speaker C spoke Malayalam 3 times, bias towards ml); you can pin a language per speaker. |
+| Similar Dravidian languages (Tamil/Malayalam/Kannada) confused | Prior + pinning; Phase 2: run a second-pass check — if ASR confidence is low, re-decode with the next-best language. |
+| Two people talking at once | v1: dominant speaker only, queue output. (Overlap separation is too heavy on-device for now.) |
+| People talk faster than TTS can speak | Queue with TTS speed 1.0→1.3×, drop very short fillers ("haan", "seri", "accha"), always show full transcript. |
+| Your own voice | 10-second enrolment; segments matching your voice are skipped. |
+| Battery / heat | VAD gates everything (models run only on speech); models loaded once; "battery saver" profile; target ≥ 2 h continuous. |
+| Bluetooth delay | Ear (a) A2DP adds ~150–250 ms; use AAC rather than LDAC for lower, more stable latency. |
 
 ---
 
-## 7. Non-functional requirements
+## 7. Non-functional targets (Phone (2) + Ear (a))
 
 | Requirement | Target |
 |---|---|
-| End-to-end latency (end of utterance → start of translated audio) | p50 ≤ 2.5 s offline on a 2023+ mid/high-end phone; ≤ 1.5 s home-server mode |
-| Translation quality | Understandable meaning for everyday conversation; measured with COMET/chrF on a test set |
-| Speaker separation | Correct speaker label on ≥ 85 % of segments for 2–4 speakers in a quiet-ish room |
-| Battery | ≥ 2 h continuous listening on a 4500 mAh phone in Mode A |
-| Storage | Base app < 60 MB; each language pack 150–600 MB; "full 5-language" set ≈ 1.5–2.5 GB |
-| Privacy | Mode A: no audio or text leaves the device, no account required, no analytics by default |
-| Supported devices (v1) | Android 10+ (API 29+), arm64, ≥ 6 GB RAM recommended (4 GB in low profile) |
+| Latency (speaker stops → English audio starts) | p50 ≤ 2.0 s, p95 ≤ 3.5 s |
+| ASR accuracy | WER ≤ ~20 % (hi), ≤ ~30 % (ta/kn/ml) on conversational test set |
+| Translation | Meaning understandable for everyday conversation (check with chrF/COMET + your own judgement) |
+| Speaker labels | ≥ 85 % correct for 2–4 speakers in a normal room |
+| Battery | ≥ 2 h continuous listening |
+| Offline | Works in airplane mode after the one-time pack download; no account, no analytics |
+| App size | APK < 60 MB + language pack ≈ 1.0–1.4 GB |
 
-### Rough latency budget (Mode A)
+### Latency budget
 | Step | Time |
 |---|---|
-| End-of-speech detection (VAD silence) | 300–500 ms |
-| ASR on a 3–5 s utterance (Whisper small q5) | 400–1000 ms |
-| Translation (OPUS-MT int8) / small LLM | 50–200 ms / 300–800 ms |
-| TTS time-to-first-audio (Piper/Kokoro) | 100–300 ms |
-| Bluetooth output latency | 150–250 ms |
-| **Total** | **≈ 1.0–2.8 s** |
+| End-of-speech detection | 300–450 ms |
+| Language ID (parallel with ASR) | ~50 ms |
+| ASR, IndicConformer on 3–5 s audio | 150–400 ms |
+| IndicTrans2 distilled, one sentence | 100–250 ms |
+| Kokoro time-to-first-audio (sentence-chunked) | 150–300 ms |
+| Bluetooth to Ear (a) | 150–250 ms |
+| **Total** | **≈ 0.9–1.7 s** typical |
 
 ---
 
-## 8. Core data model
+## 8. Testing & evaluation
+
+- **Public test sets:** AI4Bharat **IndicVoices** / **Kathbath**, Google **FLEURS** (hi, ta,
+  kn, ml) for ASR; **IN22** (IndicTrans2 benchmark) for translation.
+- **Your own test set (most important):** 10–20 min per language of real conversations
+  recorded on the Nothing Phone (2) — quiet room, restaurant/street noise, code-mixed,
+  2–4 speakers. Keep reference transcripts + English translations.
+- **Benchmark harness:** script that runs the full pipeline over the recordings and reports
+  per-stage latency, WER, chrF, language-ID accuracy and speaker error rate.
+
+---
+
+## 9. Data model
 
 ```kotlin
+enum class Lang { HI, TA, KN, ML, EN }
+
 data class Session(
     val id: String,
-    val targetLanguage: String,          // e.g. "en", "ml", "hi"
-    val expectedLanguages: List<String>, // ≤ 5, e.g. ["es","ar","zh","hi","fr"]
-    val mode: RunMode,                   // OFFLINE, HOME_SERVER, CLOUD
+    val expectedLanguages: Set<Lang> = setOf(Lang.HI, Lang.TA, Lang.KN, Lang.ML, Lang.EN),
+    val profile: Profile,                // HIGH, MID, LOW
     val startedAt: Instant,
 )
 
 data class Speaker(
-    val id: String,                      // "spk_1"
+    val id: String,
     val sessionId: String,
-    var displayName: String,             // "Speaker A" → user can rename
+    var displayName: String,             // "Speaker A" → "Priya"
     val embedding: FloatArray,           // running mean voice embedding
-    var voiceId: String,                 // TTS voice from palette
-    var languagePrior: Map<String, Float>,
+    var voiceId: Int,                    // Kokoro speaker id
+    var languagePrior: Map<Lang, Float>,
+    var pinnedLanguage: Lang? = null,
+    var muted: Boolean = false,
     val isSelf: Boolean = false,
 )
 
@@ -253,96 +270,80 @@ data class Segment(
     val sessionId: String,
     val speakerId: String,
     val startMs: Long, val endMs: Long,
-    val sourceLang: String, val langConfidence: Float,
-    val sourceText: String, val asrConfidence: Float,
-    val translatedText: String,
-    val spoken: Boolean,                 // played to earbuds or skipped (backlog/self)
+    val lang: Lang, val langConfidence: Float,
+    val sourceText: String,              // native script, e.g. Devanagari / Tamil script
+    val asrConfidence: Float,
+    val englishText: String,
+    val spoken: Boolean,                 // played, or skipped (self / backlog / muted)
 )
 ```
 
-### Streaming protocol (Mode B/C, WebSocket)
-- **Client → server:** `hello {session config, device token}`, then binary Opus frames (20 ms).
-- **Server → client events:**
-  `vad {start|end}`, `partial {speaker, lang, text}`, `final {segment}`,
-  `translation {segment_id, text}`, `audio {segment_id, opus_chunk}`, `speaker_new {id, voice}`, `error`.
-- The client can ask the server for text only and run TTS locally (saves bandwidth, keeps voices consistent).
+---
+
+## 10. Screens
+
+1. **Onboarding** — download language pack (Wi-Fi, one time), enrol your voice (10 s),
+   connect Ear (a) and turn ANC on (with screenshots of the Nothing X setting).
+2. **Live** — big start/stop button, chat-style transcript coloured per speaker (small native
+   script line + large English line), room-mix slider, "Noisy mode" toggle.
+3. **Speakers** — rename, change voice, pin language, merge, mute.
+4. **Settings** — profile (auto/High/Mid/Low), English voices palette, filler-word skipping,
+   speech speed, show/hide English-speaker re-voicing.
+5. **History** (optional) — past sessions, export as text.
+
+Also: a Quick Settings tile to start/stop listening without opening the app.
 
 ---
 
-## 9. App screens (v1)
-
-1. **Onboarding** — pick your language, download its pack, enroll your voice (10 s), check earbuds/ANC.
-2. **Session setup** — choose up to 5 expected languages (with "auto" option), mode (Offline/Home/Cloud).
-3. **Live screen** — big start/stop, live transcript as chat bubbles coloured per speaker
-   (original text small, translation large), per-speaker mute, volume of pass-through mix.
-4. **Speakers sheet** — rename speakers, change voice, merge two speakers that were split by mistake.
-5. **Language packs** — download/delete models, show sizes, choose Low/Mid/High profile.
-6. **History** (optional) — past sessions, export as text/SRT.
-
----
-
-## 10. Repository layout (proposed)
+## 11. Repository layout
 
 ```
 gossi/
-├── docs/                 # this plan, ADRs, benchmarks
-├── prototype/            # Phase 0 Python pipeline (laptop) + evaluation scripts
-├── core/                 # C/C++ inference core (sherpa-onnx, whisper.cpp, CTranslate2 glue)
-├── android/              # Kotlin + Compose app, JNI bindings to core/
-├── ios/                  # SwiftUI app (Phase 3)
-├── server/               # FastAPI streaming backend + Dockerfiles (Mode B/C)
-└── models/               # model-pack manifests (URLs, checksums, sizes, licenses) — no weights in git
+├── docs/          # this plan, decision records, benchmark results
+├── prototype/     # Phase 0: Python pipeline + evaluation harness (runs on any laptop/cloud VM)
+├── tools/         # model export/quantisation scripts (NeMo → ONNX, IndicTrans2 → CTranslate2)
+├── android/       # Kotlin + Compose app, JNI bridge, foreground service
+│   └── native/    # CMake: sherpa-onnx, onnxruntime, ctranslate2 glue
+└── models/        # language-pack manifest (URLs, SHA-256, sizes, licences) — no weights in git
 ```
 
 ---
 
-## 11. Roadmap
+## 12. Roadmap
 
-### Phase 0 — Desktop prototype (1–2 weeks)
-- Python script: mic → DeepFilterNet → Silero VAD → faster-whisper → MT → Piper → speakers/headphones.
-- Add speaker embeddings + clustering + voice palette.
-- Record a **test set**: 10–20 min of real conversations in your 5 target languages, noisy + quiet.
-- Measure latency per stage and accuracy (WER, chrF/COMET, diarization error) → pick models.
-- **Exit:** you can sit with a multilingual group and follow along through laptop + earbuds.
+### Phase 0 — Model bake-off (1–2 weeks)
+Runs on a laptop or a cloud VM (no GPU needed, it's only for choosing models — the
+final app is phone-only).
+- Export IndicConformer, IndicTrans2, VoxLingua107 LID to ONNX/CTranslate2 int8.
+- Python pipeline replicating the app pipeline; run it on FLEURS/IndicVoices + your recordings.
+- Compare IndicConformer vs IndicWhisper vs Whisper on hi/ta/kn/ml (WER, speed).
+- **Exit:** model list frozen, int8 files validated, expected accuracy known.
 
-### Phase 1 — Android offline MVP (4–6 weeks)
-- Kotlin app, foreground service, Oboe audio, phone mic in → earbuds out.
-- sherpa-onnx (VAD, speaker ID, TTS) + whisper.cpp (ASR/LID) + CTranslate2/Bergamot (MT).
-- One target language, 2–3 source languages, voice palette, live transcript.
-- Language pack downloader with checksums.
-- **Exit:** works in airplane mode on a mid/high-end phone with p50 latency ≤ 3 s.
+### Phase 1 — Android MVP (4–6 weeks)
+- Kotlin app, Oboe capture, foreground service, JNI to sherpa-onnx + ONNX Runtime + CTranslate2.
+- Pipeline: denoise → VAD → LID → IndicConformer → IndicTrans2 → Kokoro (one voice) → Ear (a).
+- Live transcript, language-pack downloader.
+- **Exit:** a Hindi or Tamil speaker → English in your ears in airplane mode, p50 ≤ 2.5 s.
 
-### Phase 2 — Multi-speaker & home server (4 weeks)
-- 5 source languages, language priors, self-voice filtering, speaker rename/merge.
-- Device benchmark → Low/Mid/High profiles; battery optimisation.
-- FastAPI + WebSocket server in Docker; QR pairing; automatic fallback to offline when disconnected.
-- **Exit:** reliable 4-speaker, 5-language dinner-table demo.
+### Phase 2 — Multi-speaker & polish (4 weeks)
+- Speaker embeddings + clustering + voice palette, self-voice filtering, Speakers screen.
+- Language priors / pinning, code-mixing handling, filler skipping, backlog speed-up.
+- Device benchmark → profiles; NPU (QNN) acceleration; battery tuning.
+- **Exit:** 4 people speaking 4 languages at a table, each heard in a distinct English voice.
 
-### Phase 3 — Quality & reach (6+ weeks)
-- Streaming partial results (start translating before the speaker finishes).
-- Voice resemblance via OpenVoice V2 / CosyVoice 2 (server, opt-in).
-- Overlapped-speech separation on server; LE Audio earbud mic; vendor ANC toggles.
-- iOS app on the shared core.
-
-### Phase 4 — Polish
-- History/export, accessibility (captions-only mode for deaf/hard-of-hearing users),
-  two-way mode (your speech → their language through phone speaker), widget/quick-tile.
+### Phase 3 — Quality
+- Streaming partial ASR (start translating long sentences before they end).
+- Indian-English voice palette, DeepFilterNet "Noisy mode", history/export, Quick Settings tile.
+- Optional: captions-only mode (accessibility), two-way mode (your English → Hindi/Tamil/… via phone speaker using AI4Bharat Indic TTS).
 
 ---
 
-## 12. Risks & open questions
+## 13. Risks
 
 | Risk | Mitigation |
 |---|---|
-| On-device speed varies widely across phones | Benchmark-based profiles; home-server mode |
-| Whisper accuracy weaker on low-resource languages | Per-language model overrides (e.g. IndicTrans2, language-specific fine-tuned Whisper) |
-| Bluetooth mic quality | Use phone mic by default; LE Audio later |
-| Recording consent / local law | Clear in-app notice; no recording stored by default; voice cloning opt-in only |
-| Model licences | Licence field in every model-pack manifest; CI check blocks NC models in "commercial" build flavour |
-
-**Decisions needed from you:**
-1. Which **target language** do you want to hear (English, Malayalam, Hindi, …)? This drives the MT and TTS choices most.
-2. Which **5 source languages** do you expect most often?
-3. Which **phone + earbuds** will you test on first (Android or iPhone)?
-4. Personal project, or possibly **commercial** later? (Decides whether NLLB/XTTS-class models are allowed.)
-5. Do you have a **PC with an NVIDIA GPU** for home-server mode?
+| IndicConformer ONNX export / NPU support is fiddly | Phase 0 de-risks it first; CPU int8 fallback is fast enough for CTC models |
+| Kannada/Malayalam accuracy lower than Hindi | Per-language model choice, language pinning, test on real recordings early |
+| Nothing Ear (a) ANC can't be controlled by apps | Clear onboarding prompt; app works regardless |
+| Battery drain in long sessions | VAD gating, battery-saver profile, thermal throttling detection |
+| Recording people / consent | On-screen notice, nothing stored by default, transcripts saved only if enabled |
