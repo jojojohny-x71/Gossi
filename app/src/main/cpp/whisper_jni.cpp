@@ -38,6 +38,13 @@ struct Pass {
     bool ok = false;
 };
 
+// Whisper's encoder always looks at a 30 s window (1500 frames, 50 per second). For short phone
+// utterances most of that is padding, so shrink it to the clip (+1 s margin): several times faster.
+int audioCtxFor(size_t n_samples) {
+    const int secs_x50 = (int) ((n_samples * 50 + WHISPER_SAMPLE_RATE - 1) / WHISPER_SAMPLE_RATE);
+    return std::min(1500, std::max(256, secs_x50 + 50));
+}
+
 Pass run(whisper_context *ctx, const std::vector<float> &pcm, const std::string &lang, bool translate, int threads) {
     whisper_full_params p = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     p.n_threads = threads;
@@ -53,6 +60,7 @@ Pass run(whisper_context *ctx, const std::vector<float> &pcm, const std::string 
     p.print_timestamps = false;
     p.suppress_blank = true;
     p.suppress_nst = true;
+    p.audio_ctx = audioCtxFor(pcm.size());
 
     Pass out;
     if (whisper_full(ctx, p, pcm.data(), (int) pcm.size()) != 0) return out;

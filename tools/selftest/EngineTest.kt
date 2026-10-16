@@ -27,7 +27,7 @@ fun main(args: Array<String>) {
         val pcm16 = readWav16k(File(dir, wav))
         val pcm = FloatArray(pcm16.size) { pcm16[it] / 32768f }
         val s = System.nanoTime()
-        val r = w.translate(pcm, null, allowed, threads, true)
+        val r = w.translate(pcm, null, allowed, threads, false) // same as the app's default
         val ms = (System.nanoTime() - s) / 1_000_000
         val en = r?.let { TranslationFilter.accept(it.english, it.noSpeechProb) } ?: "(dropped)"
         out.write("S\t$id\t$lang\t${r?.langCode}\t$ms\t${pcm.size / 16}\t$en\t$ref\t${r?.original ?: ""}\n")
