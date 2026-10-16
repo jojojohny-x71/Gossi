@@ -15,7 +15,8 @@ android {
         versionName = "0.2.0"
         ndk {
             // Modern 64-bit phones only (Nothing Phone and every phone since ~2019).
-            abiFilters += "arm64-v8a"
+            // Self-test builds add x86_64 for the emulator: -PgossiAbis=arm64-v8a,x86_64
+            abiFilters += (project.findProperty("gossiAbis") as String? ?: "arm64-v8a").split(",")
         }
         externalNativeBuild {
             cmake {

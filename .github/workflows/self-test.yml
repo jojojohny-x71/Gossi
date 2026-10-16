@@ -1,0 +1,139 @@
+name: Self-test
+
+# Runs Gossi's offline engine on real recorded speech, and the real app on an Android emulator.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "app/src/main/cpp/**"
+      - "app/src/main/java/app/gossi/offline/**"
+      - "app/src/main/java/app/gossi/audio/**"
+      - "app/src/main/java/app/gossi/core/**"
+      - "tools/selftest/**"
+      - ".github/workflows/self-test.yml"
+
+jobs:
+  audio:
+    name: Make test speech
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg espeak-ng >/dev/null
+          pip install -q gTTS numpy
+          python tools/selftest/make_audio.py testaudio
+      - uses: actions/upload-artifact@v4
+        with:
+          name: testaudio
+          path: testaudio
+
+  engine:
+    name: Engine (${{ matrix.model }})
+    needs: audio
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [base-q5_1, small-q5_1, medium-q5_0]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: testaudio
+          path: testaudio
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Build the JNI bridge + whisper.cpp for this machine
+        run: |
+          cmake -S app/src/main/cpp -B nb -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-I$JAVA_HOME/include -I$JAVA_HOME/include/linux" >/dev/null
+          cmake --build nb -j4 --target gossi_whisper >/dev/null
+          ls -la nb/libgossi_whisper.so
+      - name: Compile the harness with the app's own Kotlin sources
+        run: |
+          curl -sSL -o kc.zip https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip
+          unzip -q kc.zip
+          kotlinc/bin/kotlinc -nowarn -d test.jar \
+            app/src/main/java/app/gossi/core/Lang.kt \
+            app/src/main/java/app/gossi/audio/VoiceFeatures.kt \
+            app/src/main/java/app/gossi/offline/WhisperNative.kt \
+            app/src/main/java/app/gossi/offline/UtteranceSegmenter.kt \
+            app/src/main/java/app/gossi/offline/TranslationFilter.kt \
+            app/src/main/java/app/gossi/offline/Wav.kt \
+            tools/selftest/EngineTest.kt
+      - name: Download model
+        run: curl -sSL -o model.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${{ matrix.model }}.bin && ls -la model.bin
+      - name: Run
+        run: java -Djava.library.path=nb -cp test.jar:kotlinc/lib/kotlin-stdlib.jar EngineTestKt model.bin testaudio results_${{ matrix.model }}.tsv 2> whisper.log || (tail -50 whisper.log; exit 1)
+      - name: Report
+        run: |
+          pip install -q sacrebleu
+          TRUTH=testaudio/conversation_truth.tsv python tools/selftest/score.py results_${{ matrix.model }}.tsv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.model }}
+          path: results_*.tsv
+
+  emulator:
+    name: App on emulator
+    needs: audio
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build APK (with x86_64 for the emulator)
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug -PgossiAbis=arm64-v8a,x86_64 --no-daemon -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: testaudio
+          path: testaudio
+      - name: Download model
+        run: curl -sSL -o model.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          disable-animations: true
+          script: bash tools/selftest/emulator_test.sh app/build/outputs/apk/debug/app-debug.apk model.bin testaudio/conversation.wav emu
+      - name: Print screenshots (small JPEG, base64) and transcript
+        if: always()
+        run: |
+          pip install -q pillow
+          python - <<'PY'
+          import base64, glob, io, os
+          from PIL import Image
+          for p in sorted(glob.glob("emu/*.png")):
+              im = Image.open(p).convert("RGB")
+              im.thumbnail((360, 800))
+              buf = io.BytesIO(); im.save(buf, "JPEG", quality=55)
+              print(f"=====BEGIN {os.path.basename(p)}=====")
+              b = base64.b64encode(buf.getvalue()).decode()
+              for i in range(0, len(b), 4000): print(b[i:i+4000])
+              print(f"=====END {os.path.basename(p)}=====")
+          PY
+          echo "=====TRANSCRIPT====="; cat emu/logcat.txt || true
+          echo "=====GOSSI LOG====="; cat emu/logcat_all.txt || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator
+          path: emu

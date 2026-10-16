@@ -21,6 +21,8 @@ class OfflinePipeline(
     private val strongNoiseSuppression: Boolean,
     private val inputDevice: AudioDeviceInfo?,
     private val callbacks: Callbacks,
+    /** Self-test (debug builds): play this 16 kHz mono WAV in place of the microphone. */
+    private val testWav: File? = null,
 ) {
     interface Callbacks {
         fun onReady()
@@ -40,6 +42,7 @@ class OfflinePipeline(
     @Volatile private var running = false
     private var worker: Thread? = null
     @Volatile private var mic: MicCapture? = null
+    @Volatile private var feeder: Thread? = null
     private val segmenter = UtteranceSegmenter { utterance ->
         // Keep latency bounded: if we're far behind, drop the oldest speech.
         while (queue.size >= 4) queue.pollFirst()
@@ -60,6 +63,8 @@ class OfflinePipeline(
         running = false
         mic?.stop()
         mic = null
+        feeder?.interrupt()
+        feeder = null
         worker?.interrupt()
         worker = null
         queue.clear()
@@ -78,6 +83,21 @@ class OfflinePipeline(
             return
         }
         // Start listening only once the model is loaded.
+        if (testWav != null) {
+            feeder = Thread({ feedWav(testWav) }, "gossi-wav").apply { start() }
+            main.post { callbacks.onReady() }
+        } else startMic()
+
+        val threads = min(4, max(2, Runtime.getRuntime().availableProcessors() - 2))
+        val allowed = Lang.entries.map { it.code }.toTypedArray()
+        try {
+            loop(whisper, threads, allowed)
+        } finally {
+            whisper.close()
+        }
+    }
+
+    private fun startMic() {
         val m = MicCapture(
             strongNoiseSuppression = strongNoiseSuppression,
             preferredDevice = inputDevice,
@@ -87,46 +107,48 @@ class OfflinePipeline(
         mic = m
         m.start()
         main.post { callbacks.onReady() }
+    }
 
-        val threads = min(4, max(2, Runtime.getRuntime().availableProcessors() - 2))
-        val allowed = Lang.entries.map { it.code }.toTypedArray()
+    /** Plays a WAV file into the segmenter in real time, as if it were the microphone. */
+    private fun feedWav(file: File) {
+        val pcm = readWav16k(file)
+        val frame = ShortArray(MicCapture.FRAME)
+        var i = 0
         try {
-            while (running) {
-                val pcm16 = try { queue.takeFirst() } catch (_: InterruptedException) { break }
-                val feature = VoiceFeatureAccumulator().run {
-                    var i = 0
-                    while (i + MicCapture.FRAME <= pcm16.size) {
-                        addFrame(pcm16.copyOfRange(i, i + MicCapture.FRAME), MicCapture.FRAME)
-                        i += MicCapture.FRAME
-                    }
-                    take()
-                }
-                val pcm = FloatArray(pcm16.size) { pcm16[it] / 32768f }
-                val r = whisper.translate(pcm, forcedLang?.code, allowed, threads, showOriginal) ?: continue
-                val english = cleanup(r.english)
-                if (english.isEmpty() || r.noSpeechProb > 0.6f || isHallucination(english)) continue
-                val lang = Lang.fromLocaleTag(r.langCode) ?: Lang.HINDI
-                val original = cleanup(r.original)
-                val left = queue.size
-                main.post {
-                    callbacks.onResult(lang, english, original, feature)
-                    callbacks.onWorking(left)
-                }
+            while (running && i + MicCapture.FRAME <= pcm.size) {
+                System.arraycopy(pcm, i, frame, 0, MicCapture.FRAME)
+                if (muted) segmenter.reset() else segmenter.addFrame(frame, MicCapture.FRAME)
+                i += MicCapture.FRAME
+                Thread.sleep(20)
             }
-        } finally {
-            whisper.close()
+            frame.fill(0)
+            repeat(100) { segmenter.addFrame(frame, MicCapture.FRAME) } // trailing silence flushes the last line
+        } catch (_: InterruptedException) {
         }
     }
 
-    private fun cleanup(s: String) = s.replace(Regex("\\[[^\\]]*\\]|\\([^)]*\\)"), " ")
-        .replace(Regex("\\s+"), " ").trim()
-
-    /** Whisper's classic outputs on noise/silence. */
-    private fun isHallucination(s: String): Boolean {
-        val t = s.lowercase().trim(' ', '.', '!', '?', ',')
-        return t.length < 2 || t in setOf(
-            "you", "thank you", "thanks for watching", "thank you for watching", "bye", "subtitles by the amara.org community",
-            "please subscribe", "thank you very much", "music", "applause",
-        )
+    private fun loop(whisper: WhisperNative, threads: Int, allowed: Array<String>) {
+        while (running) {
+            val pcm16 = try { queue.takeFirst() } catch (_: InterruptedException) { break }
+            val feature = VoiceFeatureAccumulator().run {
+                var i = 0
+                while (i + MicCapture.FRAME <= pcm16.size) {
+                    addFrame(pcm16.copyOfRange(i, i + MicCapture.FRAME), MicCapture.FRAME)
+                    i += MicCapture.FRAME
+                }
+                take()
+            }
+            val pcm = FloatArray(pcm16.size) { pcm16[it] / 32768f }
+            val r = whisper.translate(pcm, forcedLang?.code, allowed, threads, showOriginal) ?: continue
+            val english = TranslationFilter.accept(r.english, r.noSpeechProb) ?: continue
+            val lang = Lang.fromLocaleTag(r.langCode) ?: Lang.HINDI
+            val original = TranslationFilter.cleanup(r.original)
+            val left = queue.size
+            main.post {
+                callbacks.onResult(lang, english, original, feature)
+                callbacks.onWorking(left)
+            }
+        }
     }
+
 }

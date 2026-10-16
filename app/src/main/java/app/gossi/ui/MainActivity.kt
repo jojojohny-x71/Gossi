@@ -76,6 +76,25 @@ class MainActivity : Activity(), Engine.Listener {
         super.onCreate(savedInstanceState)
         Engine.init(this)
         setContentView(buildUi())
+        maybeSelfTest(intent)
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        maybeSelfTest(intent)
+    }
+
+    /**
+     * Debug builds only: `adb shell am start -n app.gossi/.ui.MainActivity --ez gossi_selftest true`
+     * plays files/selftest.wav through the offline engine (see tools/selftest/emulator_test.sh).
+     */
+    private fun maybeSelfTest(intent: android.content.Intent?) {
+        val debuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+        if (!debuggable || intent?.getBooleanExtra("gossi_selftest", false) != true) return
+        intent.removeExtra("gossi_selftest")
+        val model = WhisperModel.entries.firstOrNull { it.name == intent.getStringExtra("gossi_model") } ?: WhisperModel.BASE
+        Engine.startSelfTest(java.io.File(filesDir, "selftest.wav"), model)
+        TranslatorService.start(this)
     }
 
     override fun onStart() {

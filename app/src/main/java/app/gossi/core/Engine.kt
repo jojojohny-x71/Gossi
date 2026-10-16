@@ -73,6 +73,8 @@ object Engine {
     val inputLevel: Float get() = offline?.inputLevel ?: 0f
 
     private var offline: OfflinePipeline? = null
+    /** Debug-build self-test: a WAV file played instead of the microphone. */
+    private var selfTestWav: java.io.File? = null
     private lateinit var earbudMic: EarbudMic
     private var earbudInput: AudioDeviceInfo? = null
     private var recognizer: RecognizerLoop? = null
@@ -192,6 +194,7 @@ object Engine {
             modelFile = ModelStore.file(ctx, settings.whisperModel),
             strongNoiseSuppression = settings.strongNoiseSuppression,
             inputDevice = earbudInput,
+            testWav = selfTestWav,
             callbacks = object : OfflinePipeline.Callbacks {
                 override fun onReady() {
                     val lang = settings.language?.label ?: "Auto"
@@ -234,6 +237,7 @@ object Engine {
         seg.engine = if (lang == Lang.ENGLISH) "already English" else "on-phone"
         segments.add(seg)
         while (segments.size > MAX_SEGMENTS) segments.removeAt(0)
+        android.util.Log.i("GossiTranscript", "[${speaker.name}] ${lang.label}: ${original.ifEmpty { "-" }} => $english")
         val speak = !speaker.muted && (lang != Lang.ENGLISH || settings.speakEnglish)
         if (speak) voices.speak(english, speaker.presetIndex, settings.speechRate)
         changed()
@@ -570,5 +574,16 @@ object Engine {
         if (running && settings.whisperModel == m && settings.engine == RecognitionEngine.OFFLINE) stop()
         ModelStore.delete(ctx, m)
         changed()
+    }
+
+    /**
+     * Self-test entry point (debug builds, started over adb): plays [wav] through the offline engine
+     * with [model] instead of listening to the microphone.
+     */
+    fun startSelfTest(wav: java.io.File, model: WhisperModel) {
+        stop()
+        clearConversation()
+        selfTestWav = wav
+        updateSettings(settings.copy(engine = RecognitionEngine.OFFLINE, mic = MicSource.PHONE, whisperModel = model))
     }
 }
